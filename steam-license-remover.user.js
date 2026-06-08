@@ -3,7 +3,7 @@
 // @namespace    https://github.com/berwin-cz/steam-license-remover
 // @version      1.1.0
 // @description  Automatically removes Steam complimentary licenses one by one, survives page reloads
-// @author       berwin_cz
+// @author       berwiin
 // @match        https://store.steampowered.com/account/licenses/
 // @grant        none
 // @run-at       document-idle
