@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Steam License Bulk Remover
-// @namespace    https://github.com/berwin-cz/steam-license-remover
+// @namespace    https://github.com/berwiin/steam-license-remover
 // @version      1.1.0
 // @description  Automatically removes Steam complimentary licenses one by one, survives page reloads
 // @author       berwiin
