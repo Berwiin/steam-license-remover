@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Bulk Remover
 // @namespace    https://github.com/Berwiin/steam-license-remover
-// @version      2.0.0
+// @version      2.1.0
 // @description  Bulk-removes Steam complimentary licenses — 3 speed modes, Play/Pause/Stop, 6h auto-retry on rate limit
 // @author       Berwiin
 // @match        https://store.steampowered.com/account/licenses/
@@ -28,7 +28,8 @@
   const SS_COUNT   = 'sl_removed';
   const SS_ERRORS  = 'sl_errors';
   const SS_MODE    = 'sl_mode';
-  const SS_START   = 'sl_start_ts';
+  const SS_START      = 'sl_start_ts';
+  const SS_SKIP_DELAY = 'sl_skip_delay'; // set on Play press → skips first pause
   // localStorage — persists across browser close (needed for 6h countdown)
   const LS_RESUME  = 'sl_resume_at';
 
@@ -162,6 +163,7 @@
     document.getElementById('sl-play')?.addEventListener('click', () => {
       if (isRunning) return;
       if (!sessionStorage.getItem(SS_START)) sessionStorage.setItem(SS_START, Date.now());
+      sessionStorage.setItem(SS_SKIP_DELAY, '1'); // skip pause for first item
       localStorage.removeItem(LS_RESUME);
       setState('running');
       run();
@@ -215,23 +217,42 @@
   };
 
   // ── Steam modal handler ───────────────────────────────────────────────────
+  // Two-phase: 1) wait for & click the confirm modal OK
+  //            2) watch 3s for an error modal that Steam shows after the request
   const handleModal = () => new Promise(res => {
+    let phase = 'confirm'; // → 'watch_error' after clicking OK
     let t = 0;
+
     const iv = setInterval(() => {
       t += 100;
       const dialog = document.querySelector('dialog.newmodal, dialog[open]');
-      if (dialog) {
-        const content = dialog.querySelector('.newmodal_content')?.textContent || '';
-        // Error modal (rate limit / error 84) — dismiss and report
-        if (/error|chyba|84/i.test(content)) {
-          (dialog.querySelector('.btn_grey_steamui') ||
-           dialog.querySelector('.btn_green_steamui'))?.click();
-          clearInterval(iv); res('error'); return;
+
+      if (phase === 'confirm') {
+        if (dialog) {
+          const ok = dialog.querySelector('.btn_green_steamui');
+          if (ok) {
+            ok.click();
+            phase = 'watch_error';
+            t = 0; // reset timer for phase 2
+            return;
+          }
         }
-        const ok = dialog.querySelector('.btn_green_steamui');
-        if (ok) { ok.click(); clearInterval(iv); res('ok'); return; }
+        if (t >= 7000) { clearInterval(iv); res('timeout'); }
+
+      } else { // watch_error
+        if (dialog) {
+          // A dialog appeared after we clicked OK → must be the error modal
+          const content = dialog.querySelector('.newmodal_content')?.textContent || '';
+          if (/error|84/i.test(content)) {
+            // Error 84: only a grey OK button in this modal
+            (dialog.querySelector('.btn_grey_steamui') ||
+             dialog.querySelector('.btn_green_steamui'))?.click();
+            clearInterval(iv); res('error'); return;
+          }
+        }
+        // No error dialog after 3 s → success, page will reload
+        if (t >= 3000) { clearInterval(iv); res('ok'); }
       }
-      if (t >= 7000) { clearInterval(iv); res('timeout'); }
     }, 100);
   });
 
@@ -250,10 +271,16 @@
       return;
     }
 
-    const cfg   = MODES[mode];
-    const pause = cfg.pause + Math.floor(Math.random() * cfg.jitter);
-    await delay(pause);
-    if (state !== 'running') return;
+    // Skip delay on the very first removal (or when Play was just pressed)
+    const skipDelay = sessionStorage.getItem(SS_SKIP_DELAY) === '1';
+    sessionStorage.removeItem(SS_SKIP_DELAY);
+
+    if (!skipDelay) {
+      const cfg   = MODES[mode];
+      const pause = cfg.pause + Math.floor(Math.random() * cfg.jitter);
+      await delay(pause);
+      if (state !== 'running') return;
+    }
 
     links[0].click();
     const result = await handleModal();
