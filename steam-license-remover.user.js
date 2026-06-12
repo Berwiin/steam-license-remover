@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Bulk Remover
 // @namespace    https://github.com/Berwiin/steam-license-remover
-// @version      2.1.0
+// @version      2.2.0
 // @description  Bulk-removes Steam complimentary licenses — 3 speed modes, Play/Pause/Stop, 6h auto-retry on rate limit
 // @author       Berwiin
 // @match        https://store.steampowered.com/account/licenses/
@@ -217,10 +217,13 @@
   };
 
   // ── Steam modal handler ───────────────────────────────────────────────────
-  // Two-phase: 1) wait for & click the confirm modal OK
-  //            2) watch 3s for an error modal that Steam shows after the request
+  // Two-phase: 1) wait for & click confirm modal OK
+  //            2) watch 3s for error modal Steam shows after request fails
+  //
+  // Counter saved SYNCHRONOUSLY on OK click — Steam reloads the page
+  // immediately after that, before any async code can run.
   const handleModal = () => new Promise(res => {
-    let phase = 'confirm'; // → 'watch_error' after clicking OK
+    let phase = 'confirm';
     let t = 0;
 
     const iv = setInterval(() => {
@@ -232,8 +235,11 @@
           const ok = dialog.querySelector('.btn_green_steamui');
           if (ok) {
             ok.click();
+            // Save counter NOW — page reloads any moment after this click
+            removed++;
+            sessionStorage.setItem(SS_COUNT, removed);
             phase = 'watch_error';
-            t = 0; // reset timer for phase 2
+            t = 0;
             return;
           }
         }
@@ -241,16 +247,18 @@
 
       } else { // watch_error
         if (dialog) {
-          // A dialog appeared after we clicked OK → must be the error modal
           const content = dialog.querySelector('.newmodal_content')?.textContent || '';
           if (/error|84/i.test(content)) {
-            // Error 84: only a grey OK button in this modal
+            // Undo increment — removal did not happen
+            removed = Math.max(0, removed - 1);
+            sessionStorage.setItem(SS_COUNT, removed);
+            // Dismiss error modal (grey OK button only)
             (dialog.querySelector('.btn_grey_steamui') ||
              dialog.querySelector('.btn_green_steamui'))?.click();
             clearInterval(iv); res('error'); return;
           }
         }
-        // No error dialog after 3 s → success, page will reload
+        // No error after 3 s → page already reloading, counter already saved
         if (t >= 3000) { clearInterval(iv); res('ok'); }
       }
     }, 100);
@@ -271,7 +279,6 @@
       return;
     }
 
-    // Skip delay on the very first removal (or when Play was just pressed)
     const skipDelay = sessionStorage.getItem(SS_SKIP_DELAY) === '1';
     sessionStorage.removeItem(SS_SKIP_DELAY);
 
@@ -284,6 +291,8 @@
 
     links[0].click();
     const result = await handleModal();
+    // On success: page already reloaded, counter already saved in handleModal.
+    // This line is only reached on error or timeout.
 
     if (result === 'error') {
       errors++;
@@ -292,12 +301,8 @@
       localStorage.setItem(LS_RESUME, resumeAt);
       setState('waiting');
       render();
-      return; // countdown in render() will call run() after 6h
+      return;
     }
-
-    removed++;
-    sessionStorage.setItem(SS_COUNT, removed);
-    // Steam page reload happens here → script re-injects and continues
   };
 
   // ── Entry point ───────────────────────────────────────────────────────────
