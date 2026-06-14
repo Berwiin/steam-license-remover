@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Bulk Remover
 // @namespace    https://github.com/Berwiin/steam-license-remover
-// @version      2.3.0
+// @version      2.5.0
 // @description  Bulk-removes Steam complimentary licenses — 3 speed modes, burst cooldown, Play/Pause/Stop, 6h auto-retry on rate limit
 // @author       Berwiin
 // @match        https://store.steampowered.com/account/licenses/
@@ -14,12 +14,13 @@
 
   // ── Modes ─────────────────────────────────────────────────────────────────
   // Total interval = pause + jitter + ~3s page reload
-  // burstSize    = how many removals before a forced cooldown
-  // burstCooldown = cooldown duration in ms after reaching burstSize
+  // burstSize     = how many removals before a forced cooldown
+  // burstCooldown = [min, max] ms — a random value in this range is picked
+  //                  each time the burst limit is reached
   const MODES = {
-    aggressive: { label: '⚡ Aggressive', pause: 3000,  jitter: 500,  speed: '~10/min', color: '#c6740a', burstSize: 8,  burstCooldown: 90000  },
-    safe:       { label: '🛡️ Safe',       pause: 12000, jitter: 2000, speed: '~4/min',  color: '#4c6b22', burstSize: 8,  burstCooldown: 60000  },
-    ultrasafe:  { label: '🐢 Ultra Safe', pause: 30000, jitter: 3000, speed: '~2/min',  color: '#5b7db1', burstSize: 10, burstCooldown: 45000  },
+    aggressive: { label: '⚡ Aggressive', pause: 3000,   jitter: 500,   speed: '~10/min',  color: '#c6740a', burstSize: 8,  burstCooldown: [90000, 90000]    },
+    safe:       { label: '🛡️ Safe',       pause: 12000,  jitter: 2000,  speed: '~4/min',   color: '#4c6b22', burstSize: 8,  burstCooldown: [60000, 60000]    },
+    ultrasafe:  { label: '🐢 Ultra Safe', pause: 180000, jitter: 30000, speed: '~1/3min',  color: '#5b7db1', burstSize: 10, burstCooldown: [600000, 900000]  },
   };
 
   const WAIT_AFTER_ERROR = 6 * 60 * 60 * 1000; // 6 hours in ms
@@ -41,7 +42,7 @@
   let state   = sessionStorage.getItem(SS_STATE)  || 'stopped';
   let removed = parseInt(sessionStorage.getItem(SS_COUNT)  || '0');
   let errors  = parseInt(sessionStorage.getItem(SS_ERRORS) || '0');
-  let mode    = sessionStorage.getItem(SS_MODE)   || 'safe';
+  let mode    = sessionStorage.getItem(SS_MODE)   || 'ultrasafe';
   let burstCount = parseInt(sessionStorage.getItem(SS_BURST) || '0');
 
   const setState = s => { state = s; sessionStorage.setItem(SS_STATE, s); };
@@ -78,6 +79,28 @@
   `;
   document.body.appendChild(ui);
 
+  // Hover styles for mode & control buttons (inject once per page load)
+  const style = document.getElementById('sl-ui-style') || document.createElement('style');
+  style.id = 'sl-ui-style';
+  style.textContent = `
+    #sl-ui-root button { transition: filter .12s, transform .08s, opacity .12s; }
+    #sl-ui-root button:hover:not(:disabled) {
+      filter: brightness(1.35);
+      transform: translateY(-1px);
+    }
+    #sl-ui-root button:active:not(:disabled) {
+      transform: translateY(0);
+      filter: brightness(1.1);
+    }
+    #sl-ui-root button:disabled { cursor: default; }
+    #sl-ui-root [data-mode]:hover:not(:disabled) {
+      border-color: #8f98a0 !important;
+    }
+    #sl-ui-root span[id]:hover { opacity: 1 !important; filter: brightness(1.4); }
+  `;
+  if (!document.getElementById('sl-ui-style') || style.parentNode !== document.head) document.head.appendChild(style);
+  ui.id = 'sl-ui-root';
+
   let cdInterval = null; // countdown interval handle
 
   const render = (extraStatus = '') => {
@@ -95,13 +118,13 @@
 
     // Mode buttons
     const modeBtns = Object.entries(MODES).map(([k, m]) => `
-      <button data-mode="${k}" style="
+      <button data-mode="${k}" ${!canChange ? 'disabled' : ''} style="
         flex:1;padding:4px 2px;border-radius:4px;border:1px solid;cursor:pointer;
-        font-size:10px;font-weight:bold;transition:all .15s;
+        font-size:10px;font-weight:bold;
         background:${mode===k ? m.color : 'transparent'};
         border-color:${mode===k ? m.color : '#3d5269'};
         color:${mode===k ? '#fff' : '#8f98a0'};
-        ${!canChange ? 'opacity:.45;cursor:default' : ''}
+        ${!canChange ? 'opacity:.45' : ''}
       ">${m.label}</button>
     `).join('');
 
@@ -118,12 +141,12 @@
 
     // Control buttons: Play / Pause / Stop
     const btn = (id, icon, color, active, disabled, label) => `
-      <button id="${id}" title="${label}" style="
+      <button id="${id}" title="${label}" ${disabled ? 'disabled' : ''} style="
         flex:1;padding:7px 0;border-radius:5px;border:1px solid ${color};
-        cursor:${disabled ? 'default' : 'pointer'};font-size:15px;
+        cursor:pointer;font-size:15px;
         background:${active ? color + '33' : 'transparent'};
         color:${disabled ? '#3d5269' : color};
-        transition:all .15s;
+        ${disabled ? 'opacity:.45' : ''}
       ">${icon}</button>`;
 
     const ctrlBtns =
@@ -144,7 +167,9 @@
         &nbsp;·&nbsp; ${cfg.speed}
         &nbsp;·&nbsp; retry after 6h
         <br>Burst: <b style="color:${cfg.color}">${burstCount}/${cfg.burstSize}</b>
-        &nbsp;·&nbsp; cooldown ${(cfg.burstCooldown/1000).toFixed(0)}s
+        &nbsp;·&nbsp; cooldown ${cfg.burstCooldown[0]===cfg.burstCooldown[1]
+          ? (cfg.burstCooldown[0]/1000).toFixed(0)+'s'
+          : (cfg.burstCooldown[0]/60000).toFixed(0)+'-'+(cfg.burstCooldown[1]/60000).toFixed(0)+'min'}
       </div>
 
       <div style="margin-bottom:4px;font-size:13px">
@@ -320,7 +345,9 @@
     // Burst limit reached → take a cooldown break before continuing
     const cfg0 = MODES[mode];
     if (burstCount >= cfg0.burstSize) {
-      const resumeAt = Date.now() + cfg0.burstCooldown;
+      const [cdMin, cdMax] = cfg0.burstCooldown;
+      const cooldown = cdMin + Math.floor(Math.random() * (cdMax - cdMin + 1));
+      const resumeAt = Date.now() + cooldown;
       sessionStorage.setItem(SS_COOLDOWN_UNTIL, resumeAt);
       setState('cooling');
       render();
