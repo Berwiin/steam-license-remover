@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Steam License Bulk Remover
 // @namespace    https://github.com/Berwiin/steam-license-remover
-// @version      2.2.0
-// @description  Bulk-removes Steam complimentary licenses — 3 speed modes, Play/Pause/Stop, 6h auto-retry on rate limit
+// @version      2.3.0
+// @description  Bulk-removes Steam complimentary licenses — 3 speed modes, burst cooldown, Play/Pause/Stop, 6h auto-retry on rate limit
 // @author       Berwiin
 // @match        https://store.steampowered.com/account/licenses/
 // @grant        none
@@ -14,10 +14,12 @@
 
   // ── Modes ─────────────────────────────────────────────────────────────────
   // Total interval = pause + jitter + ~3s page reload
+  // burstSize    = how many removals before a forced cooldown
+  // burstCooldown = cooldown duration in ms after reaching burstSize
   const MODES = {
-    aggressive: { label: '⚡ Aggressive', pause: 3000,  jitter: 500,  speed: '~10/min', color: '#c6740a' },
-    safe:       { label: '🛡️ Safe',       pause: 12000, jitter: 2000, speed: '~4/min',  color: '#4c6b22' },
-    ultrasafe:  { label: '🐢 Ultra Safe', pause: 30000, jitter: 3000, speed: '~2/min',  color: '#5b7db1' },
+    aggressive: { label: '⚡ Aggressive', pause: 3000,  jitter: 500,  speed: '~10/min', color: '#c6740a', burstSize: 8,  burstCooldown: 90000  },
+    safe:       { label: '🛡️ Safe',       pause: 12000, jitter: 2000, speed: '~4/min',  color: '#4c6b22', burstSize: 8,  burstCooldown: 60000  },
+    ultrasafe:  { label: '🐢 Ultra Safe', pause: 30000, jitter: 3000, speed: '~2/min',  color: '#5b7db1', burstSize: 10, burstCooldown: 45000  },
   };
 
   const WAIT_AFTER_ERROR = 6 * 60 * 60 * 1000; // 6 hours in ms
@@ -30,6 +32,8 @@
   const SS_MODE    = 'sl_mode';
   const SS_START      = 'sl_start_ts';
   const SS_SKIP_DELAY = 'sl_skip_delay'; // set on Play press → skips first pause
+  const SS_BURST     = 'sl_burst';        // removals done since last cooldown
+  const SS_COOLDOWN_UNTIL = 'sl_cooldown_until'; // sessionStorage timestamp
   // localStorage — persists across browser close (needed for 6h countdown)
   const LS_RESUME  = 'sl_resume_at';
 
@@ -38,6 +42,7 @@
   let removed = parseInt(sessionStorage.getItem(SS_COUNT)  || '0');
   let errors  = parseInt(sessionStorage.getItem(SS_ERRORS) || '0');
   let mode    = sessionStorage.getItem(SS_MODE)   || 'safe';
+  let burstCount = parseInt(sessionStorage.getItem(SS_BURST) || '0');
 
   const setState = s => { state = s; sessionStorage.setItem(SS_STATE, s); };
   const delay    = ms => new Promise(r => setTimeout(r, ms));
@@ -108,6 +113,8 @@
       else if (isWaiting) status = '🔴 Rate limit…';
       else                status = '○ Stopped';
     }
+    const isCooling = state === 'cooling';
+    if (isCooling && !extraStatus) status = '💤 Cooldown…';
 
     // Control buttons: Play / Pause / Stop
     const btn = (id, icon, color, active, disabled, label) => `
@@ -120,7 +127,7 @@
       ">${icon}</button>`;
 
     const ctrlBtns =
-      btn('sl-play',  '▶', '#4c6b22', isRunning,          isRunning,                        'Play / Resume')  +
+      btn('sl-play',  '▶', '#4c6b22', isRunning || isCooling, isRunning || isCooling,    'Play / Resume')  +
       btn('sl-pause', '⏸', '#5b7db1', isPaused || isWaiting, isStopped,                    'Pause')          +
       btn('sl-stop',  '⏹', '#8b3a3a', false,               isStopped,                       'Stop');
 
@@ -136,6 +143,8 @@
         Delay <b style="color:${cfg.color}">${(cfg.pause/1000).toFixed(0)}s</b>+jitter
         &nbsp;·&nbsp; ${cfg.speed}
         &nbsp;·&nbsp; retry after 6h
+        <br>Burst: <b style="color:${cfg.color}">${burstCount}/${cfg.burstSize}</b>
+        &nbsp;·&nbsp; cooldown ${(cfg.burstCooldown/1000).toFixed(0)}s
       </div>
 
       <div style="margin-bottom:4px;font-size:13px">
@@ -184,9 +193,10 @@
     });
 
     document.getElementById('sl-reset')?.addEventListener('click', () => {
-      removed = 0; errors = 0;
+      removed = 0; errors = 0; burstCount = 0;
       sessionStorage.setItem(SS_COUNT, '0');
       sessionStorage.setItem(SS_ERRORS, '0');
+      sessionStorage.setItem(SS_BURST, '0');
       sessionStorage.removeItem(SS_START);
       render();
     });
@@ -197,7 +207,7 @@
       setInterval(() => { if (elapsedEl) elapsedEl.textContent = elapsed(); }, 1000);
     }
 
-    // 6h countdown ticker
+    // 6h rate-limit countdown ticker
     if (isWaiting) {
       const resumeAt = parseInt(localStorage.getItem(LS_RESUME) || '0');
       cdInterval = setInterval(() => {
@@ -211,6 +221,30 @@
           run();
         } else {
           el.textContent = `🔴 Rate limit – resuming in ${formatMs(remaining)}`;
+        }
+      }, 1000);
+    }
+
+    // Burst cooldown countdown ticker (short break between bursts)
+    if (isCooling) {
+      const resumeAt = parseInt(sessionStorage.getItem(SS_COOLDOWN_UNTIL) || '0');
+      cdInterval = setInterval(() => {
+        // If the user paused/stopped during cooldown, abandon this ticker —
+        // burst count is preserved, cooldown will resume on next Play.
+        if (state !== 'cooling') { clearInterval(cdInterval); return; }
+
+        const remaining = resumeAt - Date.now();
+        const el = document.getElementById('sl-status');
+        if (!el) return;
+        if (remaining <= 0) {
+          clearInterval(cdInterval);
+          sessionStorage.removeItem(SS_COOLDOWN_UNTIL);
+          burstCount = 0;
+          sessionStorage.setItem(SS_BURST, '0');
+          setState('running');
+          run();
+        } else {
+          el.textContent = `💤 Cooldown – resuming in ${formatMs(remaining)}`;
         }
       }, 1000);
     }
@@ -235,9 +269,11 @@
           const ok = dialog.querySelector('.btn_green_steamui');
           if (ok) {
             ok.click();
-            // Save counter NOW — page reloads any moment after this click
+            // Save counters NOW — page reloads any moment after this click
             removed++;
+            burstCount++;
             sessionStorage.setItem(SS_COUNT, removed);
+            sessionStorage.setItem(SS_BURST, burstCount);
             phase = 'watch_error';
             t = 0;
             return;
@@ -251,7 +287,9 @@
           if (/error|84/i.test(content)) {
             // Undo increment — removal did not happen
             removed = Math.max(0, removed - 1);
+            burstCount = Math.max(0, burstCount - 1);
             sessionStorage.setItem(SS_COUNT, removed);
+            sessionStorage.setItem(SS_BURST, burstCount);
             // Dismiss error modal (grey OK button only)
             (dialog.querySelector('.btn_grey_steamui') ||
              dialog.querySelector('.btn_green_steamui'))?.click();
@@ -277,6 +315,16 @@
         <div>Removed <b>${removed}</b> licenses in ${elapsed()}.</div>
         <div style="color:#8f98a0;font-size:11px;margin-top:6px">Rate limit errors: ${errors}</div>`;
       return;
+    }
+
+    // Burst limit reached → take a cooldown break before continuing
+    const cfg0 = MODES[mode];
+    if (burstCount >= cfg0.burstSize) {
+      const resumeAt = Date.now() + cfg0.burstCooldown;
+      sessionStorage.setItem(SS_COOLDOWN_UNTIL, resumeAt);
+      setState('cooling');
+      render();
+      return; // cooldown ticker in render() will reset burst & call run() again
     }
 
     const skipDelay = sessionStorage.getItem(SS_SKIP_DELAY) === '1';
@@ -313,6 +361,15 @@
       localStorage.removeItem(LS_RESUME);
       setState('running');
     }
+  }
+
+  // 'cooling' state shouldn't normally survive a reload (cooldown happens
+  // between page loads, not during one) — but just in case, resume running
+  if (state === 'cooling') {
+    sessionStorage.removeItem(SS_COOLDOWN_UNTIL);
+    burstCount = 0;
+    sessionStorage.setItem(SS_BURST, '0');
+    setState('running');
   }
 
   render();
