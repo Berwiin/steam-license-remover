@@ -4,7 +4,7 @@ A Tampermonkey userscript that automatically removes all complimentary licenses 
 
 ![Tampermonkey](https://img.shields.io/badge/Tampermonkey-compatible-brightgreen?logo=tampermonkey)
 ![License](https://img.shields.io/github/license/Berwiin/steam-license-remover)
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.3.0-blue)
 
 ---
 
@@ -61,7 +61,7 @@ Mode and counter can only be changed when **Paused** or **Stopped**.
 
 ## Rate Limit Modes
 
-Valve does not publish rate limits for the license removal endpoint. The values below are derived from [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamFarm) developer findings and community reports. Each removal triggers a full page reload (~3 s), which is added on top of the pause below.
+Valve does not publish rate limits for the license removal endpoint. The values below are derived from [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamFarm) developer findings, community reports, and real-world testing. Each removal triggers a full page reload (~3 s), which is added on top of the pause below.
 
 | Mode | Pause | Jitter | Total / removal | Speed |
 |------|-------|--------|-----------------|-------|
@@ -69,11 +69,23 @@ Valve does not publish rate limits for the license removal endpoint. The values 
 | 🛡️ **Safe** | 12 s | ±2 s | ~15–17 s | ~4/min |
 | 🐢 **Ultra Safe** | 30 s | ±3 s | ~33–36 s | ~2/min |
 
+### Burst cooldown
+
+Independent of the pause above, Steam appears to enforce a **burst limit** — roughly 8–12 removals in quick succession before returning error 84, regardless of mode. To stay under this, the script tracks removals since the last cooldown and automatically takes a short break once the burst limit is reached:
+
+| Mode | Burst size | Cooldown |
+|------|-----------|----------|
+| ⚡ Aggressive | 8 removals | 90 s |
+| 🛡️ Safe | 8 removals | 60 s |
+| 🐢 Ultra Safe | 10 removals | 45 s |
+
+The UI shows live progress as `Burst: X/Y`. When the limit is hit, the status changes to `💤 Cooldown – resuming in ...` and the script resumes automatically once the cooldown ends — no error 84 needed.
+
 ---
 
 ## Error 84 — Rate Limit Exceeded
 
-When Steam returns error 84 (`RateLimitExceeded`):
+The burst cooldown above should prevent this in normal use. If it still occurs (e.g. shared network, Steam tightened limits), the script falls back to a long wait:
 
 1. The script automatically **dismisses the error modal**
 2. Stores the resume timestamp in `localStorage` (survives browser close)
